@@ -23,14 +23,14 @@ class MatchHandler : virtual public MatchIf {
 
   int32_t add(const User& user) {
     // Your implementation goes here
-    printf("add user\n");
-    printf("the userid is: %d, the username is: %s, the score is: %d\n", user.id, user.username.c_str(), user.score);
+    printf("add user: %d %s\n", user.id, user.username.c_str());
+    // printf("the userid is: %d, the username is: %s, the score is: %d\n", user.id, user.username.c_str(), user.score);
     return 0;
   }
 
   int32_t remove(const User& user) {
     // Your implementation goes here
-    printf("remove user\n");
+    printf("remove user: %d %s\n", user.id, user.username.c_str());
 
     return 0;
   }
