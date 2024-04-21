@@ -6,7 +6,11 @@
 #include <thrift/server/TSimpleServer.h>
 #include <thrift/transport/TServerSocket.h>
 #include <thrift/transport/TBufferTransports.h>
+
 #include <iostream>
+#include <queue>
+#include <mutex>
+#include <thread>
 
 using namespace ::apache::thrift;
 using namespace ::apache::thrift::protocol;
@@ -14,6 +18,83 @@ using namespace ::apache::thrift::transport;
 using namespace ::apache::thrift::server;
 
 using namespace  ::match;
+using namespace std;
+
+// product-consume
+typedef struct Task {
+    std::string op;  //task type: "add" or "remove"
+    User user;
+}task;
+
+// message_queue:  common resource
+struct MessageQueue {
+    queue<task> q;
+    mutex m;
+}message_queue;
+
+class Pool {
+    private:
+        vector<User> users;
+    public:
+        void add(User &user)
+        {
+            users.push_back(user);
+        }
+
+        void remove(User &user)
+        {
+            int32_t id =  user.id;
+            for(int32_t i = 0; i < users.size(); i ++ )
+            {
+                if(id == users[i].id) {
+                    users.erase(users.begin() + i);
+                    break;
+                }
+            }
+        }
+        
+        void save_match_result(User &a, User &b)
+        {
+            printf("match result: %d %d\n", a.id, b.id);
+        }
+
+        void match()
+        {
+            while(users.size() > 1)
+            {
+                auto a = users[0];
+                auto b = users[1];
+                users.erase(users.begin());
+                users.erase(users.begin());
+                save_match_result(a, b);
+                break;
+            }
+        }
+
+}pool;
+
+// consume: consume the task of message_queue
+void consume()
+{
+    while(true)  //do task
+    {
+        unique_lock<mutex> lck(message_queue.m);
+        if(message_queue.q.empty()) {
+            //release mutex
+            pool.match();
+            lck.unlock();
+        }else{  //do task
+            auto t = message_queue.q.front();message_queue.q.pop();
+            // release mutex
+            lck.unlock();
+            if(t.op == "add") {
+                pool.add(t.user);
+            }else if(t.op == "remove") {
+                pool.remove(t.user);
+            }
+        }
+    }
+}
 
 class MatchHandler : virtual public MatchIf {
  public:
@@ -21,16 +102,25 @@ class MatchHandler : virtual public MatchIf {
     // Your initialization goes here
   }
 
-  int32_t add(const User& user) {
+  int32_t add(const User& user) {  //add add user task
     // Your implementation goes here
     printf("add user: %d %s\n", user.id, user.username.c_str());
+    // lock
+    unique_lock<mutex> lck(message_queue.m);
+    message_queue.q.push({"add", user});
+    lck.unlock();
+
     // printf("the userid is: %d, the username is: %s, the score is: %d\n", user.id, user.username.c_str(), user.score);
     return 0;
   }
 
-  int32_t remove(const User& user) {
+  int32_t remove(const User& user) { //add remove user task
     // Your implementation goes here
     printf("remove user: %d %s\n", user.id, user.username.c_str());
+    //lock
+    unique_lock<mutex> lck(message_queue.m);
+    message_queue.q.push({"remove", user});
+    lck.unlock();
 
     return 0;
   }
@@ -46,7 +136,10 @@ int main(int argc, char **argv) {
   ::std::shared_ptr<TProtocolFactory> protocolFactory(new TBinaryProtocolFactory());
 
   TSimpleServer server(processor, serverTransport, transportFactory, protocolFactory);
-  std::cout << "start match server" << std::endl;
+
+  thread consumer(consume);
+  
+  cout << "start match server" << endl;
   server.serve();
   return 0;
 }
