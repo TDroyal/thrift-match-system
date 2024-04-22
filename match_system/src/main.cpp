@@ -23,6 +23,8 @@ using namespace ::apache::thrift::server;
 using namespace  ::match;
 using namespace std;
 
+const int MAX_DIFF_SCORE = 200;
+
 // product-consume
 typedef struct Task {
     std::string op;  //task type: "add" or "remove"
@@ -75,6 +77,7 @@ class Pool {
         {
             auto a = users[i], b = users[j];
             double score_diff = abs(a.user.score - b.user.score);  //两者的分差
+            if(score_diff > MAX_DIFF_SCORE) return false;       //分差过大，不进行匹配，否则会导致玩家水平不平衡
             double a_range = difftime(end_time, a.start_time) * 10;     //用户a可以匹配的范围
             double b_range = difftime(end_time, b.start_time) * 10;     //用户b可以匹配的范围
             return score_diff <= a_range && score_diff <= b_range;
@@ -105,7 +108,29 @@ class Pool {
                 }
                 if(!is_match) break;
             }
-            return users.size() > 1;
+            
+            if(users.size() <= 1) {
+                return false;
+            }
+            
+            //for(int32_t i = 0; i < users.size(); i ++ ) {
+            //    for(int32_t j = i + 1; j < users.size(); j ++ ) {
+            //        min_diff_score = min(min_diff_score, abs(users[i].user.score - users[j].user.score));
+            //    }
+            //}
+            
+            // 按用户分数来排序(优化时间复杂度o(nlogn))
+            sort(users.begin(), users.end(), [](Player &a, Player &b){
+                return a.user.score < b.user.score;
+            });
+            //再考虑一手，当前池里面的最小分差
+            int32_t min_diff_score = 0x3f3f3f3f;
+            for(int32_t i = 1; i < users.size(); i ++ ) {
+                min_diff_score = min(min_diff_score, users[i].user.score - users[i - 1].user.score);
+            }
+
+            // 匹配池当前有两个以上的用户，并且用户之间的最小分差在MAX_DIFF_SCORE以内，说明可以继续匹配
+            return min_diff_score <= MAX_DIFF_SCORE;
         }
 
 }pool;
