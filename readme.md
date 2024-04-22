@@ -3,6 +3,7 @@
 #### 客户端go，服务器端为c++
 - go下载官网：[官网](https://golang.google.cn/dl/)
 - linux安装go参考教程：[参考教程](https://www.liwenzhou.com/posts/Go/install/)
+- [c++ 开多线程服务器官网教程](https://github.com/apache/thrift/blob/master/tutorial/cpp/CppServer.cpp)
 
 #### thrift在ubuntu上的安装过程：
 ```

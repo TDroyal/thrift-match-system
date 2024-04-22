@@ -7,6 +7,7 @@
 #include <thrift/transport/TServerSocket.h>
 #include <thrift/transport/TBufferTransports.h>
 
+// new manual add
 #include <iostream>
 #include <queue>
 #include <mutex>
@@ -14,11 +15,20 @@
 #include <condition_variable>
 #include <time.h>
 #include <unistd.h>
+#include <thrift/server/TThreadPoolServer.h>
+#include <thrift/concurrency/ThreadManager.h>
+#include <thrift/concurrency/ThreadFactory.h>
+#include <thrift/transport/TSocket.h>
+#include <thrift/transport/TTransportUtils.h>
+#include <thrift/TToString.h>
 
 using namespace ::apache::thrift;
 using namespace ::apache::thrift::protocol;
 using namespace ::apache::thrift::transport;
 using namespace ::apache::thrift::server;
+// new manual add
+using namespace ::apache::thrift::concurrency;
+
 
 using namespace  ::match;
 using namespace std;
@@ -66,13 +76,13 @@ class Pool {
                 }
             }
         }
-        
+
         void save_match_result(Player &a, Player &b, time_t &end_time)
         {
             printf("match result: %d %d\n", a.user.id, b.user.id);
             printf("user %d costs time: %.1f, user %d costs time: %.1f\n", a.user.id, difftime(end_time, a.start_time), b.user.id, difftime(end_time, b.start_time));
         }
-    
+
         bool check(int32_t i, int32_t j, time_t &end_time)  //随着时间匹配的范围越大
         {
             auto a = users[i], b = users[j];
@@ -88,8 +98,8 @@ class Pool {
             // 如果匹配结束后，匹配池里面依旧存在多于两个用户，说明这两个用户分差过大，那么就需要每间隔1秒唤醒consume进程继续匹配。
             // 根据wait_seconds来进行排序匹配
             sort(users.begin(), users.end(), [](Player &a, Player &b){
-                return a.start_time < b.start_time;  //优先匹配等待时间长的
-            });
+                    return a.start_time < b.start_time;  //优先匹配等待时间长的
+                    });
             while(users.size() > 1)   //匹配
             {
                 bool is_match = false;
@@ -108,21 +118,21 @@ class Pool {
                 }
                 if(!is_match) break;
             }
-            
+
             if(users.size() <= 1) {
                 return false;
             }
-            
+
             //for(int32_t i = 0; i < users.size(); i ++ ) {
             //    for(int32_t j = i + 1; j < users.size(); j ++ ) {
             //        min_diff_score = min(min_diff_score, abs(users[i].user.score - users[j].user.score));
             //    }
             //}
-            
+
             // 按用户分数来排序(优化时间复杂度o(nlogn))
             sort(users.begin(), users.end(), [](Player &a, Player &b){
-                return a.user.score < b.user.score;
-            });
+                    return a.user.score < b.user.score;
+                    });
             //再考虑一手，当前池里面的最小分差
             int32_t min_diff_score = 0x3f3f3f3f;
             for(int32_t i = 1; i < users.size(); i ++ ) {
@@ -145,7 +155,7 @@ void consume()
         unique_lock<mutex> lck(message_queue.m); 
         if(message_queue.q.empty()) {
             if(!pool.match()) {   //消息队列为空后，尝试做匹配
-                // 前期没有用户来匹配，死循环占用cpu为百分百,需要阻塞住
+                                  // 前期没有用户来匹配，死循环占用cpu为百分百,需要阻塞住
                 message_queue.cv.wait(lck);  //被阻塞后，会自动释放锁lck.unlock()。被唤醒后，会自动抢占锁lck.lock()。
                 lck.unlock();
             }else {  //每间隔1秒来唤醒自身，这样能做到cpu尽可能不浪费,不然也会死循环一段时间，导致cpu占用率达到100%
@@ -167,54 +177,90 @@ void consume()
 }
 
 class MatchHandler : virtual public MatchIf {
- public:
-  MatchHandler() {
-    // Your initialization goes here
-  }
+    public:
+        MatchHandler() {
+            // Your initialization goes here
+        }
 
-  int32_t add(const User& user) {  //add add user task
-    // Your implementation goes here
-    printf("add user: %d %s\n", user.id, user.username.c_str());
-    // lock
-    unique_lock<mutex> lck(message_queue.m);
-    message_queue.q.push({"add", user});
-    lck.unlock();
+        int32_t add(const User& user) {  //add add user task
+                                         // Your implementation goes here
+            printf("add user: %d %s\n", user.id, user.username.c_str());
+            // lock
+            unique_lock<mutex> lck(message_queue.m);
+            message_queue.q.push({"add", user});
+            lck.unlock();
 
-    // 唤醒被阻塞的进程
-    message_queue.cv.notify_all();
-    // printf("the userid is: %d, the username is: %s, the score is: %d\n", user.id, user.username.c_str(), user.score);
-    return 0;
-  }
+            // 唤醒被阻塞的进程
+            message_queue.cv.notify_all();
+            // printf("the userid is: %d, the username is: %s, the score is: %d\n", user.id, user.username.c_str(), user.score);
+            return 0;
+        }
 
-  int32_t remove(const User& user) { //add remove user task
-    // Your implementation goes here
-    printf("remove user: %d %s\n", user.id, user.username.c_str());
-    //lock
-    unique_lock<mutex> lck(message_queue.m);
-    message_queue.q.push({"remove", user});
-    lck.unlock();
+        int32_t remove(const User& user) { //add remove user task
+                                           // Your implementation goes here
+            printf("remove user: %d %s\n", user.id, user.username.c_str());
+            //lock
+            unique_lock<mutex> lck(message_queue.m);
+            message_queue.q.push({"remove", user});
+            lck.unlock();
 
-    // 唤醒被阻塞的进程
-    message_queue.cv.notify_all();
-    return 0;
-  }
+            // 唤醒被阻塞的进程
+            message_queue.cv.notify_all();
+            return 0;
+        }
 
 };
 
+class MatchCloneFactory : virtual public MatchIfFactory {
+    public:
+        ~MatchCloneFactory() override = default;
+        MatchIf* getHandler(const ::apache::thrift::TConnectionInfo& connInfo) override
+        {
+            std::shared_ptr<TSocket> sock = std::dynamic_pointer_cast<TSocket>(connInfo.transport);
+            cout << "Incoming connection\n";
+            cout << "\tSocketInfo: "  << sock->getSocketInfo() << "\n";
+            cout << "\tPeerHost: "    << sock->getPeerHost() << "\n";
+            cout << "\tPeerAddress: " << sock->getPeerAddress() << "\n";
+            cout << "\tPeerPort: "    << sock->getPeerPort() << "\n";
+            return new MatchHandler;
+        }
+        void releaseHandler( MatchIf* handler) override {
+            delete handler;
+        }
+};
+
+
 int main(int argc, char **argv) {
-  int port = 9090;
-  ::std::shared_ptr<MatchHandler> handler(new MatchHandler());
-  ::std::shared_ptr<TProcessor> processor(new MatchProcessor(handler));
-  ::std::shared_ptr<TServerTransport> serverTransport(new TServerSocket(port));
-  ::std::shared_ptr<TTransportFactory> transportFactory(new TBufferedTransportFactory());
-  ::std::shared_ptr<TProtocolFactory> protocolFactory(new TBinaryProtocolFactory());
 
-  TSimpleServer server(processor, serverTransport, transportFactory, protocolFactory);
+    //单线程服务器，调用add和remove都是一个线程处理
+    //int port = 9090;
+    //::std::shared_ptr<MatchHandler> handler(new MatchHandler());
+    //::std::shared_ptr<TProcessor> processor(new MatchProcessor(handler));
+    //::std::shared_ptr<TServerTransport> serverTransport(new TServerSocket(port));
+    //::std::shared_ptr<TTransportFactory> transportFactory(new TBufferedTransportFactory());
+    //::std::shared_ptr<TProtocolFactory> protocolFactory(new TBinaryProtocolFactory());
+    //TSimpleServer server(processor, serverTransport, transportFactory, protocolFactory);
 
-  thread consumer(consume);
-  
-  cout << "start match server" << endl;
-  server.serve();
-  return 0;
+    //多线程服务器，开workerCount个线程来处理远程调用的add和remove函数
+    const int workerCount = 4;
+    std::shared_ptr<ThreadManager> threadManager =
+        ThreadManager::newSimpleThreadManager(workerCount);
+    threadManager->threadFactory(
+            std::make_shared<ThreadFactory>());
+    threadManager->start();
+
+    // This server allows "workerCount" connection at a time, and reuses threads
+    TThreadPoolServer server(
+            std::make_shared<MatchProcessorFactory>(std::make_shared<MatchCloneFactory>()),
+            std::make_shared<TServerSocket>(9090),
+            std::make_shared<TBufferedTransportFactory>(),
+            std::make_shared<TBinaryProtocolFactory>(),
+            threadManager);
+
+    thread consumer(consume); //为消费者单开一个线程
+
+    cout << "start match server" << endl;
+    server.serve();
+    return 0;
 }
 
