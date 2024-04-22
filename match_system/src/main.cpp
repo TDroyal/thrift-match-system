@@ -13,6 +13,7 @@
 #include <thread>
 #include <condition_variable>
 #include <time.h>
+#include <unistd.h>
 
 using namespace ::apache::thrift;
 using namespace ::apache::thrift::protocol;
@@ -64,24 +65,47 @@ class Pool {
             }
         }
         
-        void save_match_result(User &a, User &b)
+        void save_match_result(Player &a, Player &b, time_t &end_time)
         {
-            printf("match result: %d %d\n", a.id, b.id);
+            printf("match result: %d %d\n", a.user.id, b.user.id);
+            printf("user %d costs time: %.1f, user %d costs time: %.1f\n", a.user.id, difftime(end_time, a.start_time), b.user.id, difftime(end_time, b.start_time));
+        }
+    
+        bool check(int32_t i, int32_t j, time_t &end_time)  //随着时间匹配的范围越大
+        {
+            auto a = users[i], b = users[j];
+            double score_diff = abs(a.user.score - b.user.score);  //两者的分差
+            double a_range = difftime(end_time, a.start_time) * 10;     //用户a可以匹配的范围
+            double b_range = difftime(end_time, b.start_time) * 10;     //用户b可以匹配的范围
+            return score_diff <= a_range && score_diff <= b_range;
         }
 
-        void match()
+        bool match()
         {
-            while(users.size() > 1)
+            // 如果匹配结束后，匹配池里面依旧存在多于两个用户，说明这两个用户分差过大，那么就需要每间隔1秒唤醒consume进程继续匹配。
+            // 根据wait_seconds来进行排序匹配
+            sort(users.begin(), users.end(), [](Player &a, Player &b){
+                return a.start_time < b.start_time;  //优先匹配等待时间长的
+            });
+            while(users.size() > 1)   //匹配
             {
-                Player a = users[0];
-                Player b = users[1];
-                users.erase(users.begin());
-                users.erase(users.begin());
-                save_match_result(a.user, b.user);
-                time_t end_time = time(NULL);
-                printf("匹配时长：%.1f %.1f\n", difftime(end_time, a.start_time), difftime(end_time, b.start_time));
-                break;
+                bool is_match = false;
+                for(int32_t i = 0; i < users.size(); i ++ ) {
+                    for(int32_t j = i + 1; j < users.size(); j ++ ) {
+                        time_t end_time = time(NULL);
+                        if(check(i, j, end_time)) {
+                            save_match_result(users[i], users[j], end_time);
+                            users.erase(users.begin() + j);
+                            users.erase(users.begin() + i);
+                            is_match = true;
+                            break;
+                        }
+                    }
+                    if(is_match) break;
+                }
+                if(!is_match) break;
             }
+            return users.size() > 1;
         }
 
 }pool;
@@ -91,12 +115,18 @@ void consume()
 {
     while(true)  //do task
     {
-        unique_lock<mutex> lck(message_queue.m);
+        // unique_lock: std::unique_lock 对象 lck 的构造函数将 message_queue.m 作为参数，因此在构造 lck 对象时，会自动锁定 message_queue.m 所代表的互斥量。这样，您就获得了对互斥量的独占访问权限。
+        // 当 lck 对象超出其作用域时，即离开其定义的代码块，std::unique_lock 对象的析构函数会自动释放互斥量，从而解除锁定。
+        unique_lock<mutex> lck(message_queue.m); 
         if(message_queue.q.empty()) {
-            pool.match();   //消息队列为空后，尝试做匹配
-            // 前期没有用户来匹配，死循环占用cpu为百分百,需要阻塞住
-            message_queue.cv.wait(lck);  //被阻塞后，会自动释放锁lck.unlock()。被唤醒后，会自动抢占锁lck.lock()。
-            lck.unlock();
+            if(!pool.match()) {   //消息队列为空后，尝试做匹配
+                // 前期没有用户来匹配，死循环占用cpu为百分百,需要阻塞住
+                message_queue.cv.wait(lck);  //被阻塞后，会自动释放锁lck.unlock()。被唤醒后，会自动抢占锁lck.lock()。
+                lck.unlock();
+            }else {  //每间隔1秒来唤醒自身，这样能做到cpu尽可能不浪费,不然也会死循环一段时间，导致cpu占用率达到100%
+                lck.unlock();
+                sleep(1);  //会让线程进入阻塞状态，不会占用cpu资源
+            }
         }else{  //do task
             auto t = message_queue.q.front();message_queue.q.pop();
             // release mutex
@@ -106,7 +136,7 @@ void consume()
             }else if(t.op == "remove") {
                 pool.remove(t.user);
             }
-            pool.match();
+            pool.match();  //匹配池里面的用户没匹配完也不影响，后面一定会进入到if(q.empty())分支
         }
     }
 }
