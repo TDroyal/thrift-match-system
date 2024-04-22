@@ -11,6 +11,8 @@
 #include <queue>
 #include <mutex>
 #include <thread>
+#include <condition_variable>
+#include <time.h>
 
 using namespace ::apache::thrift;
 using namespace ::apache::thrift::protocol;
@@ -30,15 +32,24 @@ typedef struct Task {
 struct MessageQueue {
     queue<task> q;
     mutex m;
+    condition_variable cv;   //条件变量
 }message_queue;
+
+
+// 封装一下进入匹配池的用户信息（额外加一个进入匹配池的时间戳）
+typedef struct UserInfo {
+    User user;
+    time_t start_time;   //进入匹配池的时间戳
+}Player;
 
 class Pool {
     private:
-        vector<User> users;
+        vector<Player> users;
+        //每个用户进入匹配池后，都需要记一个时间戳，防止分数相差过大，一直匹配不上的问题（解决匹配饥饿问题）
     public:
         void add(User &user)
         {
-            users.push_back(user);
+            users.push_back({user, time(NULL)});
         }
 
         void remove(User &user)
@@ -46,7 +57,7 @@ class Pool {
             int32_t id =  user.id;
             for(int32_t i = 0; i < users.size(); i ++ )
             {
-                if(id == users[i].id) {
+                if(id == users[i].user.id) {
                     users.erase(users.begin() + i);
                     break;
                 }
@@ -62,11 +73,13 @@ class Pool {
         {
             while(users.size() > 1)
             {
-                auto a = users[0];
-                auto b = users[1];
+                Player a = users[0];
+                Player b = users[1];
                 users.erase(users.begin());
                 users.erase(users.begin());
-                save_match_result(a, b);
+                save_match_result(a.user, b.user);
+                time_t end_time = time(NULL);
+                printf("匹配时长：%.1f %.1f\n", difftime(end_time, a.start_time), difftime(end_time, b.start_time));
                 break;
             }
         }
@@ -80,8 +93,9 @@ void consume()
     {
         unique_lock<mutex> lck(message_queue.m);
         if(message_queue.q.empty()) {
-            //release mutex
-            pool.match();
+            pool.match();   //消息队列为空后，尝试做匹配
+            // 前期没有用户来匹配，死循环占用cpu为百分百,需要阻塞住
+            message_queue.cv.wait(lck);  //被阻塞后，会自动释放锁lck.unlock()。被唤醒后，会自动抢占锁lck.lock()。
             lck.unlock();
         }else{  //do task
             auto t = message_queue.q.front();message_queue.q.pop();
@@ -92,6 +106,7 @@ void consume()
             }else if(t.op == "remove") {
                 pool.remove(t.user);
             }
+            pool.match();
         }
     }
 }
@@ -110,6 +125,8 @@ class MatchHandler : virtual public MatchIf {
     message_queue.q.push({"add", user});
     lck.unlock();
 
+    // 唤醒被阻塞的进程
+    message_queue.cv.notify_all();
     // printf("the userid is: %d, the username is: %s, the score is: %d\n", user.id, user.username.c_str(), user.score);
     return 0;
   }
@@ -122,6 +139,8 @@ class MatchHandler : virtual public MatchIf {
     message_queue.q.push({"remove", user});
     lck.unlock();
 
+    // 唤醒被阻塞的进程
+    message_queue.cv.notify_all();
     return 0;
   }
 
